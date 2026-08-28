@@ -395,10 +395,10 @@ Invoke-ExternalCommand -Name 'az' -Arguments @(
   '--only-show-errors'
 )
 
-$remoteImage = "${registryLoginServer}/${ImageRepository}:${imageTag}"
-Invoke-ExternalCommand -Name 'docker' -Arguments @('tag', $localImageTag, $remoteImage) -Quiet
-Write-Output "Pushing $remoteImage..."
-Invoke-ExternalCommand -Name 'docker' -Arguments @('push', $remoteImage)
+$remoteImageTag = "${registryLoginServer}/${ImageRepository}:${imageTag}"
+Invoke-ExternalCommand -Name 'docker' -Arguments @('tag', $localImageTag, $remoteImageTag) -Quiet
+Write-Output "Pushing $remoteImageTag..."
+Invoke-ExternalCommand -Name 'docker' -Arguments @('push', $remoteImageTag)
 $pushedDigest = Invoke-AzText -Arguments @(
   'acr', 'repository', 'show',
   '--name', $registryName,
@@ -406,10 +406,12 @@ $pushedDigest = Invoke-AzText -Arguments @(
   '--image', "${ImageRepository}:${imageTag}",
   '--query', 'digest'
 )
-if ($pushedDigest -notmatch '^sha256:[0-9a-f]+$') {
+if ($pushedDigest -notmatch '^sha256:[0-9a-f]{64}$') {
   throw "The pushed image digest was not returned by Azure Container Registry."
 }
 Write-Output "Pushed image digest: $pushedDigest"
+$remoteImage = "${registryLoginServer}/${ImageRepository}@${pushedDigest}"
+Write-Output "Immutable image reference: $remoteImage"
 
 # RBAC propagation can lag the successful role-assignment deployment.
 Start-Sleep -Seconds 20

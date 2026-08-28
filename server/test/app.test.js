@@ -40,7 +40,7 @@ async function createTodo(baseUrl, title = 'Buy milk') {
 }
 
 async function startTestServer(options = {}) {
-  const app = createApp(options);
+  const app = createApp({ logger: () => {}, ...options });
 
   await new Promise((resolve, reject) => {
     const onError = (error) => {
@@ -111,7 +111,47 @@ describe('todo API', () => {
 
       assert.equal(response.status, 200);
       assert.deepEqual(body, { status: 'ok' });
+      assert.match(
+        response.headers.get('x-request-id'),
+        /^[0-9a-f-]{36}$/
+      );
     });
+  });
+
+  it('emits safe structured request telemetry with a correlation ID', async () => {
+    const logs = [];
+
+    await withTestServer(
+      async (baseUrl) => {
+        const { response } = await requestJson(
+          baseUrl,
+          '/api/health?token=must-not-be-logged'
+        );
+        const requestId = response.headers.get('x-request-id');
+
+        assert.equal(response.status, 200);
+        assert.equal(logs.length, 1);
+
+        const telemetry = JSON.parse(logs[0]);
+        assert.deepEqual(Object.keys(telemetry).sort(), [
+          'durationMs',
+          'event',
+          'method',
+          'pathname',
+          'requestId',
+          'status'
+        ]);
+        assert.equal(telemetry.event, 'http.request');
+        assert.equal(telemetry.requestId, requestId);
+        assert.equal(telemetry.method, 'GET');
+        assert.equal(telemetry.pathname, '/api/health');
+        assert.equal(telemetry.status, 200);
+        assert.equal(typeof telemetry.durationMs, 'number');
+        assert.ok(telemetry.durationMs >= 0);
+        assert.doesNotMatch(logs[0], /token=must-not-be-logged/);
+      },
+      { logger: (message) => logs.push(message) }
+    );
   });
 
   it('routes URL-encoded API paths through the API instead of the SPA', async () => {

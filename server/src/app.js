@@ -50,6 +50,25 @@ function sendNoContent(response) {
   response.end();
 }
 
+function getRequestPathname(requestUrl) {
+  try {
+    return new URL(requestUrl ?? '/', 'http://localhost').pathname;
+  } catch {
+    return '<invalid>';
+  }
+}
+
+function createRequestTelemetry(request, response, requestId, startedAt) {
+  return JSON.stringify({
+    event: 'http.request',
+    requestId,
+    method: request.method ?? 'GET',
+    pathname: getRequestPathname(request.url),
+    status: response.writableEnded ? response.statusCode : 0,
+    durationMs: Number((process.hrtime.bigint() - startedAt) / 1_000_000n)
+  });
+}
+
 function sendError(
   response,
   statusCode,
@@ -478,11 +497,32 @@ async function handleRequest(request, response, todos, staticDir) {
   sendNotFound(response, 'NOT_FOUND', 'Route was not found.');
 }
 
-export function createApp({ staticDir } = {}) {
+export function createApp({
+  staticDir,
+  logger = (message) => console.log(message)
+} = {}) {
   const todos = new Map();
   const resolvedStaticDir = staticDir == null ? null : resolve(staticDir);
 
   return createServer((request, response) => {
+    const requestId = randomUUID();
+    const startedAt = process.hrtime.bigint();
+    let telemetryLogged = false;
+
+    response.setHeader('x-request-id', requestId);
+
+    const logRequest = () => {
+      if (telemetryLogged) {
+        return;
+      }
+
+      telemetryLogged = true;
+      logger(createRequestTelemetry(request, response, requestId, startedAt));
+    };
+
+    response.once('finish', logRequest);
+    response.once('close', logRequest);
+
     handleRequest(request, response, todos, resolvedStaticDir).catch((error) => {
       if (response.writableEnded) {
         return;
