@@ -1,0 +1,16 @@
+.git
+.github
+.squad
+.vscode
+.copilot
+.mcp.json
+
+**/node_modules
+node_modules
+client/dist
+server/coverage
+
+.env
+.env.*
+*.log
+npm-debug.log*
