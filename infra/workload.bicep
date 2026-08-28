@@ -15,8 +15,9 @@ param managedIdentityName string
 @description('Existing Container Apps managed environment name.')
 param managedEnvironmentName string
 
-@description('Image to deploy. The deployment runner always overrides the validation default with the locally built ACR image.')
-param image string = 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
+@description('Required immutable image reference, including a digest such as registry.example/app@sha256:<digest>.')
+@minLength(1)
+param image string
 
 var resourceToken = uniqueString(subscription().id, resourceGroup().id, location, environmentName)
 var containerAppName = 'azapp${resourceToken}'
@@ -94,6 +95,18 @@ resource containerApp 'Microsoft.App/containerApps@2025-01-01' = {
           }
           probes: [
             {
+              type: 'Startup'
+              httpGet: {
+                path: '/api/health'
+                port: 3001
+                scheme: 'HTTP'
+              }
+              initialDelaySeconds: 5
+              periodSeconds: 5
+              timeoutSeconds: 3
+              failureThreshold: 30
+            }
+            {
               type: 'Liveness'
               httpGet: {
                 path: '/api/health'
@@ -123,7 +136,7 @@ resource containerApp 'Microsoft.App/containerApps@2025-01-01' = {
         }
       ]
       scale: {
-        minReplicas: 1
+        minReplicas: 0
         maxReplicas: 1
       }
     }
