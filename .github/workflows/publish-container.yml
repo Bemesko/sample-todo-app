@@ -10,13 +10,56 @@ permissions:
   contents: read
 
 env:
-  REGISTRY: souclouddemo.azurecr.io
+  # Set these repository variables to the login server and non-secret username
+  # for the registry provisioned by infra/modules/platform.bicep.
+  REGISTRY: ${{ vars.ACR_REGISTRY }}
+  REGISTRY_USERNAME: ${{ vars.ACR_USERNAME }}
   IMAGE_NAME: sample-todo-app
 
 jobs:
-  build-and-push:
+  validate:
     runs-on: ubuntu-latest
     steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate
+        run: npm run validate
+
+  build-and-push:
+    needs: validate
+    runs-on: ubuntu-latest
+    # A downstream job can pass needs.build-and-push.outputs.image to the
+    # workload's required image parameter.
+    outputs:
+      image: ${{ steps.image_ref.outputs.image_digest }}
+      image_digest: ${{ steps.image_ref.outputs.image_digest }}
+      image_tag: ${{ steps.image_ref.outputs.image_tag }}
+      digest: ${{ steps.image_ref.outputs.digest }}
+    steps:
+      - name: Check required registry configuration
+        env:
+          ACR_REGISTRY: ${{ vars.ACR_REGISTRY }}
+          ACR_USERNAME: ${{ vars.ACR_USERNAME }}
+        run: |
+          if [[ -z "$ACR_REGISTRY" ]]; then
+            echo "::error::The required repository variable ACR_REGISTRY is not configured."
+            exit 1
+          fi
+          if [[ -z "$ACR_USERNAME" ]]; then
+            echo "::error::The required repository variable ACR_USERNAME is not configured."
+            exit 1
+          fi
+
       - name: Check required registry secret
         env:
           ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
@@ -27,13 +70,13 @@ jobs:
           fi
 
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Log in to Azure Container Registry
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          username: souclouddemo
+          username: ${{ env.REGISTRY_USERNAME }}
           password: ${{ secrets.ACR_PASSWORD }}
           logout: true
 
@@ -47,9 +90,9 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=sha-${{ github.sha }}
-            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - name: Build and push image
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -57,3 +100,47 @@ jobs:
           push: true
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
+
+      - name: Expose immutable image metadata
+        id: image_ref
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          IMAGE_TAG: sha-${{ github.sha }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          if [[ -z "$IMAGE_DIGEST" ]]; then
+            echo "::error::The image digest was not returned by Docker Buildx."
+            exit 1
+          fi
+
+          IMAGE_REF="$IMAGE:$IMAGE_TAG"
+          IMAGE_DIGEST_REF="$IMAGE@$IMAGE_DIGEST"
+
+          {
+            printf 'image=%s\n' "$IMAGE_DIGEST_REF"
+            printf 'image_digest=%s\n' "$IMAGE_DIGEST_REF"
+            printf 'image_tag=%s\n' "$IMAGE_REF"
+            printf 'digest=%s\n' "$IMAGE_DIGEST"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            printf 'image=%s\n' "$IMAGE_DIGEST_REF"
+            printf 'image_digest=%s\n' "$IMAGE_DIGEST_REF"
+            printf 'image_tag=%s\n' "$IMAGE_REF"
+            printf 'digest=%s\n' "$IMAGE_DIGEST"
+          } > image-metadata.txt
+
+          {
+            echo '### Immutable image'
+            echo
+            printf '%s\n' "- Tag: \`$IMAGE_REF\`"
+            printf '%s\n' "- Digest: \`$IMAGE_DIGEST_REF\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload immutable image metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-image-metadata-${{ github.run_id }}
+          path: image-metadata.txt
+          if-no-files-found: error
+          retention-days: 7

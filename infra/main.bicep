@@ -9,6 +9,9 @@ param resourceGroupName string = 'azsampletodo'
 @description('Stable environment name used in deterministic resource naming.')
 param environmentName string = 'sampletodo'
 
+@description('Optional existing Azure Monitor action group resource ID for the Container Apps log alert.')
+param alertActionGroupId string = ''
+
 var resourceToken = uniqueString(subscription().id, location, environmentName)
 
 resource resourceGroup 'Microsoft.Resources/resourceGroups@2025-04-01' = {
@@ -22,6 +25,7 @@ module platform 'modules/platform.bicep' = {
   params: {
     environmentName: environmentName
     location: location
+    alertActionGroupId: alertActionGroupId
   }
 }
 
@@ -33,3 +37,5 @@ output managedIdentityName string = platform.outputs.managedIdentityName
 output managedEnvironmentName string = platform.outputs.managedEnvironmentName
 output containerAppName string = platform.outputs.containerAppName
 output acrPullRoleAssignmentId string = platform.outputs.acrPullRoleAssignmentId
+output alertRuleName string = platform.outputs.alertRuleName
+output alertRuleId string = platform.outputs.alertRuleId

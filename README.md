@@ -89,6 +89,7 @@ This builds the client and runs the server API tests.
 The root `Dockerfile` builds the React client and serves it with the Node API
 from one production image. It listens on port `3001` by default and honors the
 `PORT` environment variable (use an unprivileged port when overriding it).
+Its Docker `HEALTHCHECK` calls `GET /api/health` on the effective `PORT`.
 
 ```sh
 docker build --tag sample-todo-app .
@@ -97,6 +98,43 @@ docker run --rm --publish 3001:3001 sample-todo-app
 
 The container keeps todo state in memory, so restarting or replacing it clears
 the list.
+
+## Runtime telemetry
+
+The server emits one JSON line to `stdout` after every HTTP response:
+
+```json
+{
+  "event": "http.request",
+  "requestId": "2c4d6f21-9f5a-4db8-a1c2-6d4e68b4e73a",
+  "method": "GET",
+  "pathname": "/api/health",
+  "status": 200,
+  "durationMs": 2
+}
+```
+
+The server-generated `requestId` is also returned in the `x-request-id`
+response header. Telemetry contains only the method, URL pathname (never the
+query string), status, duration, and request ID; it does not log request bodies,
+credentials, or client data. Azure Container Apps captures `stdout` and
+`stderr` in the existing Log Analytics destination. JSON is stored as text in
+the `Log_s` column of `ContainerAppConsoleLogs_CL`, so parse it when querying:
+
+```kusto
+ContainerAppConsoleLogs_CL
+| where ContainerAppName_s == '<container-app-name>'
+| extend telemetry = parse_json(Log_s)
+| where tostring(telemetry.event) == 'http.request'
+| project TimeGenerated,
+    RequestId=tostring(telemetry.requestId),
+    Method=tostring(telemetry.method),
+    Path=tostring(telemetry.pathname),
+    Status=toint(telemetry.status),
+    DurationMs=toint(telemetry.durationMs)
+| order by TimeGenerated desc
+| take 100
+```
 
 ## Deploying to Azure Container Apps
 
@@ -129,10 +167,11 @@ and verification workflow:
 
 The runner builds the existing `Dockerfile`, starts the image locally to check
 `/api/health` and the UI, creates or updates the platform, logs in with
-`az acr login`, pushes an immutable `sha-<image-id>` tag, and deploys that exact
-image. It runs `what-if` before both the subscription and resource-group
-deployments. A bounded HTTPS retry then checks the public root, health endpoint,
-and `POST`/`GET`/`PATCH`/`DELETE` todo flow.
+`az acr login`, pushes an immutable `sha-<image-id>` tag, reads the resulting
+content digest, and deploys the digest-qualified image reference
+(`registry/repository@sha256:<digest>`). It runs `what-if` before both the
+subscription and resource-group deployments. A bounded HTTPS retry then checks
+the public root, health endpoint, and `POST`/`GET`/`PATCH`/`DELETE` todo flow.
 
 The generated resources are:
 
@@ -143,6 +182,16 @@ The generated resources are:
 - Consumption-based Container Apps managed environment
 - One public Container App with HTTPS ingress on port `3001`, single revision,
   health probes, explicit CORS, and conservative CPU/memory limits
+- Enabled Azure Monitor log alert for HTTP 5xx responses, with an optional
+  operator-provided action group
+
+The workload intentionally uses `minReplicas: 0` and `maxReplicas: 1` for this
+sample. This is not highly available: scale-to-zero introduces cold starts, and
+multiple replicas would diverge because todo state is in memory. Do not increase
+`maxReplicas` until persistence and coordination are added. Set `minReplicas`
+to at least `1` in the workload template only when an always-on single replica
+is required. The Docker health check and Container Apps startup, liveness, and
+readiness probes all use `GET /api/health` on port `3001`.
 
 The runner prints the resource IDs and provisioning states, registry image tag
 and digest, Container App FQDN, public URL, and Azure portal resource-group URL.
@@ -158,14 +207,55 @@ App clears the list.
 ## Publishing to Azure Container Registry
 
 `.github/workflows/publish-container.yml` publishes
-`souclouddemo.azurecr.io/sample-todo-app` on pushes to the default `main` branch
-and on manual dispatches. Configure this repository Actions secret before
-running it:
+the `sample-todo-app` image on pushes to the default `main` branch and on manual
+dispatches. A validation job runs `npm ci` and `npm run validate` before the
+build-and-push job. Configure these repository Actions values before running it:
 
-- `ACR_PASSWORD` — a credential allowed to push to the registry.
+- `ACR_REGISTRY` — the registry login server, such as
+  `azacr<token>.azurecr.io`, without an `https://` prefix.
+- `ACR_USERNAME` — the non-secret username for a least-privilege principal
+  allowed to push to that registry.
+- `ACR_PASSWORD` — the corresponding secret for that principal.
 
-The workflow uses the non-secret registry username `souclouddemo`. Every run
-publishes an immutable `sha-<full commit SHA>` tag. `latest` is published only
-when the workflow runs for `main`; a manual run on another ref receives only
-the commit-SHA tag. This existing publishing workflow is unchanged and is not
+The platform template disables ACR admin credentials and grants its managed
+identity `AcrPull` only. An operator must therefore provision the CI principal
+and grant it `AcrPush` at the registry scope; the workflow does not invent or
+store those credentials. Every run pushes only a `sha-<full commit SHA>` tag,
+returns the content digest as a job output, and uploads the immutable image
+reference as an artifact. It never publishes or falls back to `latest`. For a
+direct workload deployment, pass the registry name, repository name, and the
+64-character digest (without the `sha256:` prefix) as separate parameters;
+`infra/workload.bicep` constructs the resulting
+`registry/repository@sha256:<digest>` reference. The publishing workflow is not
 used by the local Azure deployment described above.
+
+## Alerting
+
+The platform template creates an enabled Azure Monitor scheduled-query log
+alert scoped to the existing Log Analytics workspace. It filters the verified
+`ContainerAppConsoleLogs_CL` table for the app's structured `http.request`
+telemetry and alerts when an HTTP status is at least `500`:
+
+```kusto
+ContainerAppConsoleLogs_CL
+| where ContainerAppName_s == '<container-app-name>'
+| extend telemetry = parse_json(Log_s)
+| where tostring(telemetry.event) == 'http.request'
+| where toint(tostring(telemetry.status)) >= 500
+| summarize ErrorCount = count() by bin(TimeGenerated, 5m)
+```
+
+`alertActionGroupId` is optional and defaults to an empty value. The rule is
+still created without notifications when it is omitted; no recipients or
+action groups are invented. To attach an existing action group, pass its full
+resource ID to the deployment runner:
+
+```powershell
+.\infra\deploy.ps1 -ResourceToken todo -AlertActionGroupId '/subscriptions/<subscription-id>/resourceGroups/<resource-group-name>/providers/Microsoft.Insights/actionGroups/<action-group-name>'
+```
+
+The custom console-log table can take time to appear after the environment
+emits its first logs, so the template skips deployment-time query validation
+after verifying the table and columns against the Container Apps schema. Query
+the workspace after deployment and confirm that an action group is configured
+if notifications are required.

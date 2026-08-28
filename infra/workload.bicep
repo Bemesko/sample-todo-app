@@ -15,11 +15,18 @@ param managedIdentityName string
 @description('Existing Container Apps managed environment name.')
 param managedEnvironmentName string
 
-@description('Image to deploy. The deployment runner always overrides the validation default with the locally built ACR image.')
-param image string = 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
+@description('Container image repository name without a tag or digest.')
+@minLength(1)
+param imageRepository string
+
+@description('Required 64-character lowercase SHA-256 digest without the sha256: prefix. The deployment runner validates the hexadecimal format before deployment.')
+@minLength(64)
+@maxLength(64)
+param imageDigest string
 
 var resourceToken = uniqueString(subscription().id, resourceGroup().id, location, environmentName)
 var containerAppName = 'azapp${resourceToken}'
+var image = '${registry.properties.loginServer}/${imageRepository}@sha256:${imageDigest}'
 
 resource registry 'Microsoft.ContainerRegistry/registries@2025-04-01' existing = {
   name: registryName
@@ -94,6 +101,18 @@ resource containerApp 'Microsoft.App/containerApps@2025-01-01' = {
           }
           probes: [
             {
+              type: 'Startup'
+              httpGet: {
+                path: '/api/health'
+                port: 3001
+                scheme: 'HTTP'
+              }
+              initialDelaySeconds: 5
+              periodSeconds: 5
+              timeoutSeconds: 3
+              failureThreshold: 30
+            }
+            {
               type: 'Liveness'
               httpGet: {
                 path: '/api/health'
@@ -123,7 +142,8 @@ resource containerApp 'Microsoft.App/containerApps@2025-01-01' = {
         }
       ]
       scale: {
-        minReplicas: 1
+        // Todo state is in memory; multiple replicas would diverge.
+        minReplicas: 0
         maxReplicas: 1
       }
     }

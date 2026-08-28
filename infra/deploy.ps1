@@ -7,6 +7,7 @@ param(
   [string]$ResourceGroupName = 'azsampletodo',
   [string]$Location = 'brazilsouth',
   [string]$EnvironmentName = 'sampletodo',
+  [string]$AlertActionGroupId = '',
   [string]$ImageRepository = 'sample-todo-app',
   [ValidateRange(1024, 65535)]
   [int]$LocalPort = 3011,
@@ -105,6 +106,16 @@ function Invoke-AzText {
     throw "az $($Arguments -join ' ') failed with exit code $exitCode.`n$text"
   }
   return $text.Trim()
+}
+
+function Get-Sha256Digest {
+  param([Parameter(Mandatory)][string]$Digest)
+
+  if ($Digest -cnotmatch '^sha256:([0-9a-f]{64})$') {
+    throw "Azure Container Registry returned an invalid SHA-256 digest '$Digest'."
+  }
+
+  return $Matches[1]
 }
 
 function Get-DeploymentOutput {
@@ -323,7 +334,8 @@ $platformWhatIfArguments = @(
   '--location', $Location,
   '--subscription', $SubscriptionId,
   '--template-file', $mainTemplate,
-  '--parameters', "@$mainParameters"
+  '--parameters', "@$mainParameters",
+  "alertActionGroupId=$AlertActionGroupId"
 )
 Invoke-WhatIf -Scope 'Platform' -Arguments $platformWhatIfArguments
 
@@ -334,7 +346,8 @@ $platformDeployment = Invoke-AzJson -Arguments @(
   '--location', $Location,
   '--subscription', $SubscriptionId,
   '--template-file', $mainTemplate,
-  '--parameters', "@$mainParameters"
+  '--parameters', "@$mainParameters",
+  "alertActionGroupId=$AlertActionGroupId"
 )
 
 $registryName = Get-DeploymentOutput -Deployment $platformDeployment -Name 'registryName'
@@ -342,6 +355,8 @@ $registryLoginServer = Get-DeploymentOutput -Deployment $platformDeployment -Nam
 $managedIdentityName = Get-DeploymentOutput -Deployment $platformDeployment -Name 'managedIdentityName'
 $managedEnvironmentName = Get-DeploymentOutput -Deployment $platformDeployment -Name 'managedEnvironmentName'
 $containerAppName = Get-DeploymentOutput -Deployment $platformDeployment -Name 'containerAppName'
+$alertRuleName = Get-DeploymentOutput -Deployment $platformDeployment -Name 'alertRuleName'
+$alertRuleId = Get-DeploymentOutput -Deployment $platformDeployment -Name 'alertRuleId'
 $platformResourceToken = Get-DeploymentOutput -Deployment $platformDeployment -Name 'resourceToken'
 $resourceGroupId = Get-DeploymentOutput -Deployment $platformDeployment -Name 'resourceGroupId'
 Write-Output "Platform resource token: $platformResourceToken"
@@ -349,6 +364,7 @@ Write-Output "Resource group ID: $resourceGroupId"
 Write-Output "Registry: $registryName ($registryLoginServer)"
 Write-Output "Managed identity: $managedIdentityName"
 Write-Output "Managed environment: $managedEnvironmentName"
+Write-Output "Alert rule: $alertRuleName ($alertRuleId)"
 
 $registry = Invoke-AzJson -Arguments @(
   'acr', 'show',
@@ -395,10 +411,10 @@ Invoke-ExternalCommand -Name 'az' -Arguments @(
   '--only-show-errors'
 )
 
-$remoteImage = "${registryLoginServer}/${ImageRepository}:${imageTag}"
-Invoke-ExternalCommand -Name 'docker' -Arguments @('tag', $localImageTag, $remoteImage) -Quiet
-Write-Output "Pushing $remoteImage..."
-Invoke-ExternalCommand -Name 'docker' -Arguments @('push', $remoteImage)
+$remoteImageTag = "${registryLoginServer}/${ImageRepository}:${imageTag}"
+Invoke-ExternalCommand -Name 'docker' -Arguments @('tag', $localImageTag, $remoteImageTag) -Quiet
+Write-Output "Pushing $remoteImageTag..."
+Invoke-ExternalCommand -Name 'docker' -Arguments @('push', $remoteImageTag)
 $pushedDigest = Invoke-AzText -Arguments @(
   'acr', 'repository', 'show',
   '--name', $registryName,
@@ -406,10 +422,10 @@ $pushedDigest = Invoke-AzText -Arguments @(
   '--image', "${ImageRepository}:${imageTag}",
   '--query', 'digest'
 )
-if ($pushedDigest -notmatch '^sha256:[0-9a-f]+$') {
-  throw "The pushed image digest was not returned by Azure Container Registry."
-}
+$imageDigest = Get-Sha256Digest -Digest $pushedDigest
 Write-Output "Pushed image digest: $pushedDigest"
+$remoteImage = "${registryLoginServer}/${ImageRepository}@sha256:${imageDigest}"
+Write-Output "Immutable image reference: $remoteImage"
 
 # RBAC propagation can lag the successful role-assignment deployment.
 Start-Sleep -Seconds 20
@@ -421,7 +437,8 @@ $workloadParameters = @(
   "registryName=$registryName",
   "managedIdentityName=$managedIdentityName",
   "managedEnvironmentName=$managedEnvironmentName",
-  "image=$remoteImage"
+  "imageRepository=$ImageRepository",
+  "imageDigest=$imageDigest"
 )
 $workloadWhatIfArguments = @(
   'deployment', 'group', 'what-if',
