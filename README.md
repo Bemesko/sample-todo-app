@@ -98,6 +98,63 @@ docker run --rm --publish 3001:3001 sample-todo-app
 The container keeps todo state in memory, so restarting or replacing it clears
 the list.
 
+## Deploying to Azure Container Apps
+
+The local deployment runner provisions the app in subscription
+`571400a1-1f0a-4d1f-9003-1bd19a468181`, resource group `azsampletodo`, and region
+`brazilsouth`. It does not use GitHub Actions or registry passwords.
+
+### Prerequisites
+
+- Node.js 20 or newer and npm
+- Docker Desktop running
+- Azure CLI 2.77 or newer with the built-in Bicep integration
+- PowerShell 5.1 or newer
+- An Azure login with permission to deploy resources and create the `AcrPull`
+  role assignment
+
+Sign in and select the approved subscription:
+
+```powershell
+az login
+az account set --subscription 571400a1-1f0a-4d1f-9003-1bd19a468181
+```
+
+Run the idempotent local build, validation, what-if, provision, push, deploy,
+and verification workflow:
+
+```powershell
+.\infra\deploy.ps1 -ResourceToken todo
+```
+
+The runner builds the existing `Dockerfile`, starts the image locally to check
+`/api/health` and the UI, creates or updates the platform, logs in with
+`az acr login`, pushes an immutable `sha-<image-id>` tag, and deploys that exact
+image. It runs `what-if` before both the subscription and resource-group
+deployments. A bounded HTTPS retry then checks the public root, health endpoint,
+and `POST`/`GET`/`PATCH`/`DELETE` todo flow.
+
+The generated resources are:
+
+- Private/authenticated Azure Container Registry (Basic SKU; anonymous pulls
+  and admin credentials disabled)
+- Log Analytics workspace connected to the Container Apps environment
+- User-assigned managed identity with `AcrPull` scoped only to the registry
+- Consumption-based Container Apps managed environment
+- One public Container App with HTTPS ingress on port `3001`, single revision,
+  health probes, explicit CORS, and conservative CPU/memory limits
+
+The runner prints the resource IDs and provisioning states, registry image tag
+and digest, Container App FQDN, public URL, and Azure portal resource-group URL.
+To remove the deployed resource group after inspection:
+
+```powershell
+az group delete --name azsampletodo --subscription 571400a1-1f0a-4d1f-9003-1bd19a468181 --yes --no-wait
+```
+
+Todo data remains in memory in Azure, so replacing or restarting the Container
+App clears the list.
+
 ## Publishing to Azure Container Registry
 
 `.github/workflows/publish-container.yml` publishes
@@ -110,4 +167,5 @@ running it:
 The workflow uses the non-secret registry username `souclouddemo`. Every run
 publishes an immutable `sha-<full commit SHA>` tag. `latest` is published only
 when the workflow runs for `main`; a manual run on another ref receives only
-the commit-SHA tag.
+the commit-SHA tag. This existing publishing workflow is unchanged and is not
+used by the local Azure deployment described above.
