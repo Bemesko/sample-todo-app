@@ -4,7 +4,7 @@ A small full-stack todo app foundation with a React client and a Node.js API.
 
 ## Structure
 
-- `client/` — React UI served by Vite during development.
+- `client/` — React UI built by Vite and served by the production Node process.
 - `server/` — Node.js HTTP API with no database or web framework yet.
 - `scripts/dev.mjs` — starts the client and server together from one command.
 
@@ -83,3 +83,31 @@ npm run validate
 ```
 
 This builds the client and runs the server API tests.
+
+## Container image
+
+The root `Dockerfile` builds the React client and serves it with the Node API
+from one production image. It listens on port `3001` by default and honors the
+`PORT` environment variable (use an unprivileged port when overriding it).
+
+```sh
+docker build --tag sample-todo-app .
+docker run --rm --publish 3001:3001 sample-todo-app
+```
+
+The container keeps todo state in memory, so restarting or replacing it clears
+the list.
+
+## Publishing to Azure Container Registry
+
+`.github/workflows/publish-container.yml` publishes
+`souclouddemo.azurecr.io/sample-todo-app` on pushes to the default `main` branch
+and on manual dispatches. Configure this repository Actions secret before
+running it:
+
+- `ACR_PASSWORD` — a credential allowed to push to the registry.
+
+The workflow uses the non-secret registry username `souclouddemo`. Every run
+publishes an immutable `sha-<full commit SHA>` tag. `latest` is published only
+when the workflow runs for `main`; a manual run on another ref receives only
+the commit-SHA tag.

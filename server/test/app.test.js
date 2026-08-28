@@ -1,9 +1,15 @@
 import assert from 'node:assert/strict';
+import { dirname, resolve } from 'node:path';
 import { describe, it } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { createApp } from '../src/app.js';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const MAX_TITLE_LENGTH = 200;
+const CLIENT_SOURCE_DIR = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  '../../client'
+);
 
 async function requestJson(baseUrl, path, options = {}) {
   const response = await fetch(`${baseUrl}${path}`, {
@@ -33,8 +39,8 @@ async function createTodo(baseUrl, title = 'Buy milk') {
   return result.body.todo;
 }
 
-async function startTestServer() {
-  const app = createApp();
+async function startTestServer(options = {}) {
+  const app = createApp(options);
 
   await new Promise((resolve, reject) => {
     const onError = (error) => {
@@ -66,8 +72,8 @@ async function stopTestServer(app) {
   });
 }
 
-async function withTestServer(callback) {
-  const { app, baseUrl } = await startTestServer();
+async function withTestServer(callback, options = {}) {
+  const { app, baseUrl } = await startTestServer(options);
 
   try {
     return await callback(baseUrl);
@@ -106,6 +112,51 @@ describe('todo API', () => {
       assert.equal(response.status, 200);
       assert.deepEqual(body, { status: 'ok' });
     });
+  });
+
+  it('routes URL-encoded API paths through the API instead of the SPA', async () => {
+    await withTestServer(
+      async (baseUrl) => {
+        const health = await requestJson(baseUrl, '/%61pi/health');
+        const apiRoot = await requestJson(baseUrl, '/%61pi');
+        const unknown = await requestJson(baseUrl, '/%61pi/unknown');
+
+        assert.equal(health.response.status, 200);
+        assert.deepEqual(health.body, { status: 'ok' });
+        assert.equal(apiRoot.response.status, 404);
+        assert.deepEqual(apiRoot.body, {
+          error: {
+            code: 'NOT_FOUND',
+            message: 'Route was not found.'
+          }
+        });
+        assert.equal(unknown.response.status, 404);
+        assert.deepEqual(unknown.body, {
+          error: {
+            code: 'NOT_FOUND',
+            message: 'Route was not found.'
+          }
+        });
+      },
+      { staticDir: CLIENT_SOURCE_DIR }
+    );
+  });
+
+  it('returns a JSON not-found response for malformed encoded API paths', async () => {
+    await withTestServer(
+      async (baseUrl) => {
+        const { response, body } = await requestJson(baseUrl, '/%61pi/%');
+
+        assert.equal(response.status, 404);
+        assert.deepEqual(body, {
+          error: {
+            code: 'NOT_FOUND',
+            message: 'Route was not found.'
+          }
+        });
+      },
+      { staticDir: CLIENT_SOURCE_DIR }
+    );
   });
 
   it('lists an empty todo collection initially', async () => {
@@ -457,5 +508,22 @@ describe('todo API', () => {
         }
       });
     });
+  });
+
+  it('serves the client entry point when a static directory is configured', async () => {
+    await withTestServer(
+      async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/`);
+        const source = await response.text();
+
+        assert.equal(response.status, 200);
+        assert.match(
+          response.headers.get('content-type'),
+          /^text\/html;/
+        );
+        assert.match(source, /<title>Sample Todo App<\/title>/);
+      },
+      { staticDir: CLIENT_SOURCE_DIR }
+    );
   });
 });

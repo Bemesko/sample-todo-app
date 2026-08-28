@@ -1,11 +1,28 @@
 import { randomUUID } from 'node:crypto';
+import { readFile, stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
+import { extname, isAbsolute, relative, resolve, sep } from 'node:path';
 
 const TODO_COLLECTION_PATH = '/api/todos';
 const MAX_BODY_BYTES = 1024 * 1024;
 const MAX_TITLE_LENGTH = 200;
 const CREATE_FIELDS = new Set(['title']);
 const UPDATE_FIELDS = new Set(['title', 'completed']);
+const STATIC_CONTENT_TYPES = new Map([
+  ['.css', 'text/css; charset=utf-8'],
+  ['.gif', 'image/gif'],
+  ['.html', 'text/html; charset=utf-8'],
+  ['.ico', 'image/x-icon'],
+  ['.jpeg', 'image/jpeg'],
+  ['.jpg', 'image/jpeg'],
+  ['.js', 'text/javascript; charset=utf-8'],
+  ['.json', 'application/json; charset=utf-8'],
+  ['.png', 'image/png'],
+  ['.svg', 'image/svg+xml'],
+  ['.webp', 'image/webp'],
+  ['.woff', 'font/woff'],
+  ['.woff2', 'font/woff2']
+]);
 
 class ApiError extends Error {
   constructor(statusCode, code, message, details) {
@@ -224,7 +241,7 @@ function validateUpdate(body) {
   return update;
 }
 
-function getTodoId(pathname) {
+function getTodoId(pathname, { decodeId = true } = {}) {
   const prefix = `${TODO_COLLECTION_PATH}/`;
 
   if (!pathname.startsWith(prefix)) {
@@ -235,6 +252,10 @@ function getTodoId(pathname) {
 
   if (encodedId === '' || encodedId.includes('/')) {
     return null;
+  }
+
+  if (!decodeId) {
+    return encodedId;
   }
 
   try {
@@ -260,11 +281,128 @@ function sendNotFound(response, code, message) {
   sendError(response, 404, code, message);
 }
 
-async function handleRequest(request, response, todos) {
+function decodePathname(pathname) {
+  try {
+    return decodeURIComponent(pathname);
+  } catch {
+    return null;
+  }
+}
+
+function isApiPath(pathname) {
+  const decodedPathname = decodePathname(pathname);
+
+  return (
+    pathname === '/api' ||
+    pathname.startsWith('/api/') ||
+    decodedPathname === '/api' ||
+    decodedPathname?.startsWith('/api/')
+  );
+}
+
+function getSafeStaticPath(staticDir, pathname) {
+  let decodedPathname;
+
+  try {
+    decodedPathname = decodeURIComponent(pathname);
+  } catch {
+    return null;
+  }
+
+  const relativePath =
+    decodedPathname === '/' ? 'index.html' : decodedPathname.slice(1);
+  const filePath = resolve(staticDir, relativePath);
+  const pathFromRoot = relative(staticDir, filePath);
+
+  if (
+    pathFromRoot === '..' ||
+    pathFromRoot.startsWith(`..${sep}`) ||
+    isAbsolute(pathFromRoot)
+  ) {
+    return null;
+  }
+
+  return { decodedPathname, filePath };
+}
+
+async function resolveStaticFile(staticDir, pathname) {
+  const requestedPath = getSafeStaticPath(staticDir, pathname);
+
+  if (requestedPath === null) {
+    return null;
+  }
+
+  try {
+    const fileStats = await stat(requestedPath.filePath);
+
+    if (fileStats.isFile()) {
+      return requestedPath;
+    }
+  } catch {
+    // Fall through to the SPA entry point for client-side routes.
+  }
+
+  if (
+    requestedPath.decodedPathname !== '/' &&
+    extname(requestedPath.decodedPathname) === ''
+  ) {
+    const indexPath = getSafeStaticPath(staticDir, '/');
+
+    if (indexPath === null) {
+      return null;
+    }
+
+    try {
+      const indexStats = await stat(indexPath.filePath);
+
+      if (indexStats.isFile()) {
+        return indexPath;
+      }
+    } catch {
+      // A missing static directory is handled as an ordinary 404.
+    }
+  }
+
+  return null;
+}
+
+async function serveStatic(request, response, staticDir, pathname) {
+  if (
+    staticDir === null ||
+    !['GET', 'HEAD'].includes(request.method) ||
+    isApiPath(pathname)
+  ) {
+    return false;
+  }
+
+  const staticFile = await resolveStaticFile(staticDir, pathname);
+
+  if (staticFile === null) {
+    return false;
+  }
+
+  const payload = await readFile(staticFile.filePath);
+  const extension = extname(staticFile.filePath).toLowerCase();
+
+  response.writeHead(200, {
+    'cache-control':
+      extension === '.html' ? 'no-cache' : 'public, max-age=31536000, immutable',
+    'content-length': payload.byteLength,
+    'content-type':
+      STATIC_CONTENT_TYPES.get(extension) ?? 'application/octet-stream'
+  });
+  response.end(request.method === 'HEAD' ? undefined : payload);
+
+  return true;
+}
+
+async function handleRequest(request, response, todos, staticDir) {
   const url = new URL(request.url ?? '/', 'http://localhost');
+  const decodedPathname = decodePathname(url.pathname);
+  const pathname = decodedPathname ?? url.pathname;
   const method = request.method ?? 'GET';
 
-  if (url.pathname === '/api/health') {
+  if (pathname === '/api/health') {
     if (method !== 'GET') {
       sendMethodNotAllowed(response, 'GET');
       return;
@@ -274,7 +412,7 @@ async function handleRequest(request, response, todos) {
     return;
   }
 
-  if (url.pathname === TODO_COLLECTION_PATH) {
+  if (pathname === TODO_COLLECTION_PATH) {
     if (method === 'GET') {
       sendJson(response, 200, { todos: [...todos.values()] });
       return;
@@ -298,7 +436,10 @@ async function handleRequest(request, response, todos) {
     return;
   }
 
-  const todoId = getTodoId(url.pathname);
+  const todoId =
+    decodedPathname === null
+      ? null
+      : getTodoId(pathname, { decodeId: false });
 
   if (todoId !== null) {
     if (method === 'PATCH') {
@@ -330,14 +471,19 @@ async function handleRequest(request, response, todos) {
     return;
   }
 
+  if (await serveStatic(request, response, staticDir, url.pathname)) {
+    return;
+  }
+
   sendNotFound(response, 'NOT_FOUND', 'Route was not found.');
 }
 
-export function createApp() {
+export function createApp({ staticDir } = {}) {
   const todos = new Map();
+  const resolvedStaticDir = staticDir == null ? null : resolve(staticDir);
 
   return createServer((request, response) => {
-    handleRequest(request, response, todos).catch((error) => {
+    handleRequest(request, response, todos, resolvedStaticDir).catch((error) => {
       if (response.writableEnded) {
         return;
       }
