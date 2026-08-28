@@ -66,7 +66,8 @@ with an `Allow` header. Deleting a missing todo is also `404`.
 
 ## Run locally
 
-Requires Node.js 20 or newer.
+Requires Node.js 20.19.0 or newer, or Node.js 22.12.0 or newer. These are the
+versions supported by the Vite release used by the client workspace.
 
 ```sh
 npm install
