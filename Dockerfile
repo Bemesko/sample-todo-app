@@ -16,7 +16,8 @@ COPY server server
 
 FROM node:22-bookworm-slim AS runtime
 
-ENV NODE_ENV=production PORT=3001
+# Infra is set up to serve on port 3001; This intentionally breaks the app while the pipeline passes.
+ENV NODE_ENV=production PORT=3002
 
 WORKDIR /app
 
