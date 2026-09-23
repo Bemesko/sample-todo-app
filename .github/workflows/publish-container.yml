@@ -105,7 +105,7 @@ jobs:
         id: image_ref
         env:
           IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          IMAGE_TAG: sha-${{ github.sha }}
+          IMAGE_TAG: latest
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           if [[ -z "$IMAGE_DIGEST" ]]; then
